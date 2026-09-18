@@ -1,0 +1,485 @@
+# title: Bowling_Mega_Mix_Compacted (CHIP-8 Port)
+# author: Daniel Hanrahan Tools and Games (Ported to Octo)
+# license: GNU GPL-3.0
+
+# =====================
+# ALIASES & GAME STATE
+# =====================
+:alias ball_x      v1
+:alias ball_y      v2
+:alias ball_moving v3
+:alias mode        v4
+:alias frame       v5
+:alias roll        v6
+:alias pins_left   v7  
+:alias frame_score v8
+:alias loop_idx    v9  
+:alias temp_val    va  
+:alias math_temp   vb  
+:alias pin_x       vc  
+:alias pin_y       vd  
+:alias temp_val_2  ve  
+# vF is strictly reserved for hardware collision and math flags
+
+# =====================
+# MAIN ENTRY POINT
+# =====================
+: main
+    # Wait for ANY key press to start
+    v0 := key 
+
+    mode := 0          
+    frame := 0        
+
+    # Initial setup
+    reset_frame
+
+: main_loop
+    # Handle ball rendering and logic
+    if ball_moving != 1 then jump skip_ball_erase
+    # Erase moving ball before updating
+    load_ball_sprite
+    sprite ball_x ball_y 8
+    
+    : skip_ball_erase
+    update_input
+    update_ball
+    
+    # Draw ball at new position
+    load_ball_sprite
+    sprite ball_x ball_y 8
+    
+    # Simple fixed frame delay (~60 FPS target)
+    v0 := 1
+    delay := v0
+    : wait_loop
+    v0 := delay
+    if v0 != 0 then jump wait_loop
+    
+    jump main_loop
+
+# =====================
+# DATA ARRAYS
+# =====================
+
+# How many rolls allowed per mode
+: ROLLS_PER_FRAME
+    0x02 0x03 0x03 0x02 0x02 0x03
+
+# How many total pins per mode
+: PINS_PER_MODE
+    0x0A 0x0A 0x0A 0x09 0x09 0x05
+
+# Pin coordinate layouts (X Y pairs - exactly 10 pairs / 20 bytes per mode)
+: PIN_LAYOUTS
+    # Mode 0: 10 PIN (Centered around ball_x = 28)
+    16 2   24 2   32 2   40 2
+    20 6   28 6   36 6   24 10
+    32 10  28 14
+
+    # Mode 1: DUCKPIN (Centered)
+    16 2   24 2   32 2   40 2
+    20 6   28 6   36 6   24 10
+    32 10  28 14
+
+    # Mode 2: CANDLEPIN (Centered)
+    16 2   24 2   32 2   40 2
+    20 6   28 6   36 6   24 10
+    32 10  28 14
+
+    # Mode 3: HOLY 9 PIN
+    32 2   28 6   36 6   24 10
+    32 10  40 10  28 14  36 14
+    32 18  0  0
+
+    # Mode 4: TEXAS 9 PIN
+    32 2   28 6   36 6   24 10
+    32 10  40 10  28 14  36 14
+    32 18  0  0
+
+    # Mode 5: 5 PIN
+    32 14  28 10  36 10  24 6   
+    40 6   0  0   0  0   0  0   
+    0  0   0  0
+
+# Stores 1 if pin is standing, 0 if knocked down (max 10 slots)
+: active_pins
+    0 0 0 0 0 0 0 0 0 0
+
+# Buffer used to hold score digits
+: bcd_buffer
+    0 0 0
+
+# =====================
+# CORE LOGIC
+# =====================
+
+: update_input
+    # Ignore movement/mode switch if ball is rolling
+    if ball_moving == 1 then jump skip_input
+    
+    # Q: Change Mode (Key 4)
+    v0 := 4
+    if v0 -key then jump skip_mode_change
+    mode += 1
+    if mode != 6 then jump skip_mode_wrap
+    mode := 0          
+    : skip_mode_wrap
+    
+    # Reset frame state and clear screen on mode switch
+    frame := 0
+    reset_frame
+    return 
+    
+    : skip_mode_change
+    
+    # A: Move Left (Key 7)
+    v0 := 7
+    if v0 -key then jump skip_left
+    if ball_x > 0 then ball_x += 255 # ball_x -= 1
+    return 
+    
+    : skip_left
+    # D: Move Right (Key 9)
+    v0 := 9
+    if v0 -key then jump skip_right
+    if ball_x < 56 then ball_x += 1
+    return
+    
+    : skip_right
+    # W: Throw Ball (Key 5)
+    v0 := 5
+    if v0 -key then jump skip_throw
+    ball_moving := 1
+    
+    : skip_throw
+    : skip_input
+    return
+
+
+: update_ball
+    if ball_moving != 1 then return
+    
+    # Move ball up the lane
+    ball_y += 255 # -1
+    
+    # Collision check with active pins
+    loop_idx := 0
+    : collision_loop
+    if loop_idx == 10 then jump collision_done
+    
+    # Is pin standing?
+    i := active_pins
+    i += loop_idx
+    load v0
+    if v0 == 0 then jump next_col_pin
+    
+    # Load Pin X and Y
+    get_pin_coords
+    
+    # Skip if slot is empty (x == 0)
+    if pin_x == 0 then jump next_col_pin
+    
+    # Bounding Box Collision Check (8x8 Sprites)
+    # Precise 8x8 Bounding Box Collision Check (exact sprite size)
+    v0 := pin_x
+    v0 += 8
+    math_temp := ball_x
+    v0 -= math_temp
+    if vF == 0 then jump next_col_pin 
+    
+    v0 := ball_x
+    v0 += 8
+    math_temp := pin_x
+    v0 -= math_temp
+    if vF == 0 then jump next_col_pin 
+    
+    v0 := pin_y
+    v0 += 8
+    math_temp := ball_y
+    v0 -= math_temp
+    if vF == 0 then jump next_col_pin 
+    
+    v0 := ball_y
+    v0 += 8
+    math_temp := pin_y
+    v0 -= math_temp
+    if vF == 0 then jump next_col_pin
+    
+    # === COLLISION DETECTED ===
+    i := active_pins
+    i += loop_idx
+    v0 := 0
+    save v0
+    
+    # Erase pin visually from the lane
+    load_pin_sprite
+    sprite pin_x pin_y 8
+    
+    # Update on-screen score tracking (erase old score)
+    draw_score         
+    
+    # Calculate score based on mode and pin hit
+    v0 := 1
+    if mode != 5 then jump apply_score
+    if loop_idx == 0 then v0 := 5
+    if loop_idx == 1 then v0 := 3
+    if loop_idx == 2 then v0 := 3
+    if loop_idx == 3 then v0 := 2
+    if loop_idx == 4 then v0 := 2
+    
+    : apply_score
+    frame_score += v0
+    
+    pins_left += 255   
+    
+    # Draw new score
+    draw_score         
+    
+    : next_col_pin
+    loop_idx += 1
+    jump collision_loop
+    
+    : collision_done
+    
+    # Strike / Spare Check (Early frame reset)
+    if pins_left == 0 then jump force_reset
+    
+    # Continue rolling until ball reaches top edge
+    if ball_y > 2 then return
+    
+    # End of lane logic (Missed some pins)
+    roll += 1
+    ball_moving := 0
+    ball_y := 24
+    
+    i := ROLLS_PER_FRAME
+    i += mode
+    load v0 
+    
+    if roll <= v0 then return
+    
+    : force_reset
+    # Small visual pause so the player sees the strike
+    v0 := 30
+    delay := v0
+    : pause_loop
+    v0 := delay
+    if v0 != 0 then jump pause_loop
+    
+    reset_frame
+    return
+
+# =====================
+# RENDER/HELPER SUBS
+# =====================
+
+: draw_score
+    i := bcd_buffer
+    bcd frame_score
+
+    # Read Tens digit (Offset 1)
+    i := bcd_buffer
+    v0 := 1
+    i += v0
+    load v0
+    temp_val := v0
+
+    # Read Ones digit (Offset 2)
+    i := bcd_buffer
+    v0 := 2
+    i += v0
+    load v0
+    temp_val_2 := v0
+
+    # Draw Tens digit at (2, 2)
+    i := hex temp_val
+    pin_x := 2
+    pin_y := 2
+    sprite pin_x pin_y 5
+    
+    # Draw Ones digit at (7, 2)
+    i := hex temp_val_2
+    pin_x := 7
+    pin_y := 2
+    sprite pin_x pin_y 5
+    
+    return
+
+: reset_frame
+    frame += 1
+    roll := 1
+    frame_score := 0
+    ball_moving := 0
+    ball_x := 28   
+    ball_y := 24
+    
+    i := PINS_PER_MODE
+    i += mode
+    load v0
+    pins_left := v0
+    
+    loop_idx := 0
+    : reset_pins_loop
+    if loop_idx == 10 then jump done_reset_pins
+    i := active_pins
+    i += loop_idx
+    v0 := 1
+    save v0
+    loop_idx += 1
+    jump reset_pins_loop
+    
+    : done_reset_pins
+    clear
+    draw_pins
+    draw_score
+    return
+
+
+: get_pin_coords
+    temp_val := mode
+    math_temp := 20
+    
+    temp_val_2 := 0
+    : mul_loop_1
+    if math_temp == 0 then jump mul_done_1
+    temp_val_2 += temp_val
+    math_temp += 255
+    jump mul_loop_1
+    : mul_done_1
+    
+    temp_val := loop_idx
+    temp_val += temp_val 
+    temp_val_2 += temp_val
+    
+    i := PIN_LAYOUTS
+    i += temp_val_2
+    load v0 
+    pin_x := v0
+    
+    # Advance I to Y coordinate using register addition
+    v0 := 1
+    i += v0
+    load v0 
+    pin_y := v0
+    return
+
+
+: load_pin_sprite
+    if mode == 1 then jump load_duckpin
+    if mode == 2 then jump load_candlepin
+    
+    if mode != 4 then jump load_std_pin
+    if loop_idx != 4 then jump load_std_pin
+    i := SPRITE_RED_PIN
+    return
+    
+    : load_std_pin
+    i := SPRITE_PIN
+    return
+    
+    : load_duckpin
+    i := SPRITE_DUCKPIN
+    return
+    
+    : load_candlepin
+    i := SPRITE_CANDLEPIN
+    return
+
+: draw_pins
+    loop_idx := 0
+    : draw_loop
+    if loop_idx == 10 then return
+    
+    i := active_pins
+    i += loop_idx
+    load v0
+    if v0 == 0 then jump next_draw_pin
+    
+    get_pin_coords
+    
+    if pin_x == 0 then jump next_draw_pin
+    
+    load_pin_sprite
+    sprite pin_x pin_y 8
+    
+    : next_draw_pin
+    loop_idx += 1
+    jump draw_loop
+
+
+: load_ball_sprite
+    if mode == 1 then jump load_small_ball
+    if mode == 2 then jump load_small_ball
+    if mode == 5 then jump load_small_ball
+    
+    i := SPRITE_BALL
+    return
+    
+    : load_small_ball
+    i := SPRITE_SMALL_BALL
+    return
+
+# =====================
+# SPRITES
+# =====================
+
+: SPRITE_BALL
+    0b00111100
+    0b01111110
+    0b11111111
+    0b11101111
+    0b11010111
+    0b11111111
+    0b01111110
+    0b00111100
+
+: SPRITE_SMALL_BALL
+    0b00000000
+    0b00111100
+    0b01100110
+    0b01011010
+    0b01100110
+    0b00111100
+    0b00000000
+    0b00000000
+
+: SPRITE_PIN
+    0b00011000
+    0b00111100
+    0b00011000
+    0b00011000
+    0b00111100
+    0b00111100
+    0b01111110
+    0b01111110
+
+: SPRITE_RED_PIN 
+    0b00011000
+    0b00100100
+    0b00011000
+    0b00011000
+    0b00100100
+    0b00111100
+    0b01011010
+    0b01111110
+
+: SPRITE_DUCKPIN
+    0b00000000
+    0b00000000
+    0b00011000
+    0b00111100
+    0b00011000
+    0b00111100
+    0b01111110
+    0b01111110
+
+: SPRITE_CANDLEPIN
+    0b00011000
+    0b00011000
+    0b00011000
+    0b00011000
+    0b00011000
+    0b00011000
+    0b00011000
+    0b00011000
